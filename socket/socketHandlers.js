@@ -8,11 +8,25 @@ const {
   isUserOnline 
 } = require('../config/redis');
 const logger = require('../utils/logger');
-const { translateText } = require('../services/translationService');
 const { deductCoins } = require('../services/coinService');
-const { sendPushNotification } = require('../services/notificationService');
 
-module.exports = (io, socket) => {
+// Optional services - gracefully handle if they fail to load
+let translateText, sendPushNotification;
+try {
+  translateText = require('../services/translationService').translateText;
+} catch (error) {
+  logger.warn('Translation service not available:', error.message);
+  translateText = null;
+}
+
+try {
+  sendPushNotification = require('../services/notificationService').sendPushNotification;
+} catch (error) {
+  logger.warn('Notification service not available:', error.message);
+  sendPushNotification = null;
+}
+
+const handleConnection = (io, socket) => {
   const userId = socket.userId;
   const user = socket.user;
 
@@ -130,17 +144,21 @@ module.exports = (io, socket) => {
           .select('device_tokens', 'display_name')
           .first();
 
-        if (recipient && recipient.device_tokens) {
-          const deviceTokens = JSON.parse(recipient.device_tokens);
-          await sendPushNotification(deviceTokens, {
-            title: `New message from ${user.display_name}`,
-            body: content.substring(0, 100),
-            data: {
-              type: 'message',
-              conversationId,
-              senderId: userId
-            }
-          });
+        if (recipient && recipient.device_tokens && sendPushNotification) {
+          try {
+            const deviceTokens = JSON.parse(recipient.device_tokens);
+            await sendPushNotification(deviceTokens, {
+              title: `New message from ${user.display_name}`,
+              body: content.substring(0, 100),
+              data: {
+                type: 'message',
+                conversationId,
+                senderId: userId
+              }
+            });
+          } catch (error) {
+            logger.error('Failed to send push notification:', error);
+          }
         }
       }
 
@@ -227,6 +245,10 @@ module.exports = (io, socket) => {
 
       if (!message.content) {
         return socket.emit('error', { message: 'No content to translate' });
+      }
+
+      if (!translateText) {
+        return socket.emit('error', { message: 'Translation service not available' });
       }
 
       const translatedText = await translateText(message.content, targetLanguage);
@@ -588,3 +610,6 @@ module.exports = (io, socket) => {
     logger.error(`Socket error for user ${userId}:`, error);
   });
 };
+
+module.exports = handleConnection;
+module.exports.handleConnection = handleConnection;
